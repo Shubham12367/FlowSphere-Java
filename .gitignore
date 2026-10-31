@@ -1,0 +1,14 @@
+﻿target/
+*.class
+*.war
+*.log
+hs_err_pid*
+replay_pid*
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+nbproject/private/
+.DS_Store
+Thumbs.db
