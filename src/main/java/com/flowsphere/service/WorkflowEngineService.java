@@ -1,25 +1,13 @@
 package com.flowsphere.service;
 
-import com.flowsphere.entity.RoleName;
+import com.flowsphere.entity.*;
 import com.flowsphere.repository.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
-import java.util.Collections;
-
-@Service
-public class WorkflowEngineService {
-
-package com.flowsphere.service;
-
-import com.flowsphere.entity.RoleName;
-import com.flowsphere.repository.*;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
+import java.util.List;
+import java.util.Optional;
 
 @Service
 public class WorkflowEngineService {
@@ -31,80 +19,164 @@ public class WorkflowEngineService {
     private WorkflowDefinitionRepository workflowDefinitionRepository;
 
     @Autowired
+    private WorkflowVersionRepository workflowVersionRepository;
+
+    @Autowired
     private WorkflowInstanceRepository workflowInstanceRepository;
 
     @Autowired
     private WorkflowStageInstanceRepository workflowStageInstanceRepository;
 
     @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private DepartmentRepository departmentRepository;
+
+    @Autowired
     private NotificationService notificationService;
 
     @Autowired
-    private AuditLogRepository auditLogRepository;
+    private TaskService taskService;
 
-    @PersistenceContext
-    private EntityManager entityManager;
+    @Autowired
+    private AuditService auditService;
+
+    @Autowired
+    private ApprovalActionRepository approvalActionRepository;
 
     /**
-     * Starts a workflow for the given request. It creates a WorkflowInstance linked to the request,
-     * creates the first WorkflowStageInstance according to the first stage defined in the workflow version,
-     * assigns it to the appropriate user (e.g., manager), and records audit & notification.
+     * Start a workflow for a submitted request.
      */
     @Transactional
-    public void startWorkflow(Long requestId) {
+    public WorkflowInstance startWorkflow(Long requestId) {
         Request request = requestRepository.findById(requestId)
                 .orElseThrow(() -> new IllegalArgumentException("Request not found: " + requestId));
-        // For simplicity, pick the first workflow definition (demo)
-        WorkflowDefinition definition = workflowDefinitionRepository.findAll()
-                .stream().findFirst()
-                .orElseThrow(() -> new IllegalStateException("No workflow definition available"));
-        // Use latest version (assume versionNumber ordering)
-        WorkflowVersion version = definition.getVersions()
-                .stream().max((v1, v2) -> Integer.compare(v1.getVersionNumber(), v2.getVersionNumber()))
-                .orElseThrow(() -> new IllegalStateException("No workflow version defined"));
 
-        // Create instance
+        if (request.getStatus() != RequestStatus.DRAFT && request.getStatus() != RequestStatus.SUBMITTED) {
+            throw new IllegalStateException("Request cannot be started in status: " + request.getStatus());
+        }
+
+        // Find active workflow definition matching request type or first active
+        WorkflowDefinition definition = workflowDefinitionRepository.findByStatus(WorkflowStatus.ACTIVE)
+                .stream()
+                .filter(d -> d.getName().equalsIgnoreCase(request.getRequestType()) || 
+                             (d.getCategory() != null && d.getCategory().equalsIgnoreCase(request.getRequestType())))
+                .findFirst()
+                .orElseGet(() -> workflowDefinitionRepository.findByStatus(WorkflowStatus.ACTIVE)
+                        .stream().findFirst()
+                        .orElseThrow(() -> new IllegalStateException("No active workflow definition configured")));
+
+        // Find latest version
+        WorkflowVersion version = workflowVersionRepository.findFirstByWorkflowDefinitionIdOrderByVersionNumberDesc(definition.getId())
+                .orElseGet(() -> {
+                    WorkflowVersion defaultVersion = new WorkflowVersion();
+                    defaultVersion.setWorkflowDefinition(definition);
+                    defaultVersion.setVersionNumber(1);
+                    defaultVersion.setStagesJson("[{\"order\":1,\"name\":\"Manager Approval\",\"role\":\"MANAGER\"}," +
+                                                "{\"order\":2,\"name\":\"IT Department Head Approval\",\"role\":\"DEPARTMENT_HEAD\"}," +
+                                                "{\"order\":3,\"name\":\"IT Processor Fulfillment\",\"role\":\"PROCESSOR\"}]");
+                    return workflowVersionRepository.save(defaultVersion);
+                });
+
+        // Create workflow instance
         WorkflowInstance instance = new WorkflowInstance();
         instance.setRequest(request);
         instance.setWorkflowDefinition(definition);
         instance.setWorkflowVersion(version);
         instance.setStatus(RequestStatus.IN_PROGRESS);
-        workflowInstanceRepository.save(instance);
+        instance = workflowInstanceRepository.save(instance);
 
-        // Create first stage instance – placeholder stage named "MANAGER_APPROVAL"
-        WorkflowStageInstance stage = new WorkflowStageInstance();
-        stage.setWorkflowInstance(instance);
-        stage.setStageName("MANAGER_APPROVAL");
-        stage.setStageOrder(1);
-        stage.setStatus(RequestStatus.PENDING_APPROVAL);
-        // Assign to manager of the requester's department (simplified)
-        User manager = findManagerForDepartment(request.getDepartment());
-        stage.setAssignedUser(manager);
-        workflowStageInstanceRepository.save(stage);
+        // Create Stage 1: Manager Approval
+        WorkflowStageInstance stage1 = new WorkflowStageInstance();
+        stage1.setWorkflowInstance(instance);
+        stage1.setStageOrder(1);
+        stage1.setStageName("Manager Approval");
+        stage1.setStatus(RequestStatus.PENDING_APPROVAL);
+
+        User manager = resolveApproverForStage(1, "MANAGER", request);
+        stage1.setAssignedUser(manager);
+        stage1 = workflowStageInstanceRepository.save(stage1);
 
         // Update request status
         request.setStatus(RequestStatus.PENDING_APPROVAL);
+        request.setUpdatedAt(LocalDateTime.now());
         requestRepository.save(request);
 
-        // Notification to manager
-        notificationService.createNotification(manager,
-                "New Request Pending Approval",
-                "Request " + request.getRequestNumber() + " is awaiting your approval.");
+        // Record initial timeline action
+        ApprovalAction submitAction = new ApprovalAction(
+                request,
+                stage1,
+                request.getCreatedBy(),
+                "SUBMITTED",
+                "Request Submission",
+                "Request submitted and assigned to Manager for approval"
+        );
+        approvalActionRepository.save(submitAction);
+
+        // Create Task for manager
+        if (manager != null) {
+            taskService.createTask(
+                    stage1,
+                    "Review Request " + request.getRequestNumber(),
+                    "Review and approve " + request.getTitle() + " submitted by " + request.getCreatedBy().getFirstName() + " " + request.getCreatedBy().getLastName(),
+                    manager
+            );
+
+            notificationService.createNotification(
+                    manager,
+                    "New Approval Required",
+                    "Request " + request.getRequestNumber() + " (" + request.getTitle() + ") is pending your approval."
+            );
+        }
 
         // Audit log
-        AuditLog audit = new AuditLog();
-        audit.setUser(request.getCreatedBy());
-        audit.setAction("WORKFLOW_STARTED");
-        audit.setDetails("Workflow instance " + instance.getId() + " created for request " + request.getRequestNumber());
-        auditLogRepository.save(audit);
+        auditService.log(
+                request.getCreatedBy(),
+                "WORKFLOW_STARTED",
+                "Workflow started for request " + request.getRequestNumber() + " with definition: " + definition.getName()
+        );
+
+        return instance;
     }
 
-    private User findManagerForDepartment(Department department) {
-        // Simplified: find any user with Role MANAGER in the same department
-        return entityManager.createQuery("SELECT u FROM User u JOIN u.roles r WHERE r.name = :role AND u.department = :dept", User.class)
-                .setParameter("role", RoleName.MANAGER)
-                .setParameter("dept", department)
-                .setMaxResults(1)
-                .getSingleResult();
+    /**
+     * Resolve the approver for a specific stage.
+     */
+    public User resolveApproverForStage(int stageOrder, String roleRequired, Request request) {
+        if (stageOrder == 1 || "MANAGER".equalsIgnoreCase(roleRequired)) {
+            // First look for a manager in requester's department
+            if (request.getDepartment() != null) {
+                List<User> deptManagers = userRepository.findByRolesNameAndDepartmentId(RoleName.MANAGER, request.getDepartment().getId());
+                if (!deptManagers.isEmpty()) {
+                    return deptManagers.get(0);
+                }
+            }
+            // Fall back to any manager
+            List<User> anyManagers = userRepository.findByRolesName(RoleName.MANAGER);
+            if (!anyManagers.isEmpty()) {
+                return anyManagers.get(0);
+            }
+        } else if (stageOrder == 2 || "DEPARTMENT_HEAD".equalsIgnoreCase(roleRequired)) {
+            // Look for IT department head or any department head
+            Optional<Department> itDept = departmentRepository.findByCode("IT");
+            if (itDept.isPresent() && itDept.get().getHeadUser() != null) {
+                return itDept.get().getHeadUser();
+            }
+            List<User> heads = userRepository.findByRolesName(RoleName.DEPARTMENT_HEAD);
+            if (!heads.isEmpty()) {
+                return heads.get(0);
+            }
+        } else if (stageOrder == 3 || "PROCESSOR".equalsIgnoreCase(roleRequired)) {
+            // Look for IT processor
+            List<User> processors = userRepository.findByRolesName(RoleName.PROCESSOR);
+            if (!processors.isEmpty()) {
+                return processors.get(0);
+            }
+        }
+
+        // Fallback to super admin if specific role not found
+        List<User> admins = userRepository.findByRolesName(RoleName.SUPER_ADMIN);
+        return admins.isEmpty() ? null : admins.get(0);
     }
 }

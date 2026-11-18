@@ -4,6 +4,8 @@ import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import lombok.ToString;
+import lombok.EqualsAndHashCode;
 
 @Entity
 @Table(name = "workflow_versions")
@@ -18,6 +20,8 @@ public class WorkflowVersion {
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "workflow_definition_id", nullable = false)
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
     private WorkflowDefinition workflowDefinition;
 
     @Column(nullable = false)

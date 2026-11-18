@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.AllArgsConstructor;
+import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "requests")
@@ -30,7 +31,7 @@ public class Request {
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    private Priority priority;
+    private Priority priority = Priority.MEDIUM;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
@@ -47,4 +48,24 @@ public class Request {
     // JSON payload for dynamic fields defined by workflow version
     @Column(columnDefinition = "TEXT")
     private String fieldValuesJson;
+
+    @Column(columnDefinition = "TEXT")
+    private String remarks;
+
+    private LocalDateTime createdAt = LocalDateTime.now();
+
+    private LocalDateTime updatedAt = LocalDateTime.now();
+
+    @PrePersist
+    public void onPrePersist() {
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
+        }
+        updatedAt = LocalDateTime.now();
+    }
+
+    @PreUpdate
+    public void onPreUpdate() {
+        updatedAt = LocalDateTime.now();
+    }
 }

@@ -4,6 +4,9 @@ import jakarta.persistence.*;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.AllArgsConstructor;
+import lombok.ToString;
+import lombok.EqualsAndHashCode;
+import java.util.HashSet;
 import java.util.Set;
 
 @Entity
@@ -29,10 +32,14 @@ public class WorkflowDefinition {
 
     // One-to-many versions
     @OneToMany(mappedBy = "workflowDefinition", cascade = CascadeType.ALL, orphanRemoval = true)
-    private Set<WorkflowVersion> versions;
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
+    private Set<WorkflowVersion> versions = new HashSet<>();
 
     // Current active version (optional convenience)
     @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "current_version_id")
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
     private WorkflowVersion currentVersion;
 }
